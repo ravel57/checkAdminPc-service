@@ -14,71 +14,97 @@ using System.Threading.Tasks;
 using Newtonsoft.Json;
 
 namespace checkAdminPc_service {
-    class Settings {
-        public string key;
-        public string serverUrl;
-        public string computerName;
-    }
+	class Settings {
+		public string key;
+		public string serverUrl;
+		public string computerName;
+	}
 
 
-    public partial class checkAdminPC : ServiceBase {
+	public partial class checkAdminPC : ServiceBase {
 
-        static string setJson = File.ReadAllText(".\\set.json");
-        static Settings settings = JsonConvert.DeserializeObject<Settings>(setJson);
+		static string setJsonFile = File.ReadAllText("C:\\Program Files\\checkAdminPc\\set.json");
+		static Settings settings = JsonConvert.DeserializeObject<Settings>(setJsonFile);
+		static string lastSendLoggedUser = "";
+		static DateTime lastSendTime = DateTime.Now;
 
-        public checkAdminPC() {
-            InitializeComponent();
-        }
+		public checkAdminPC() {
+			InitializeComponent();
+		}
 
-        void exec() {
-            ITerminalServer server = new TerminalServicesManager().GetLocalServer();
-            server.Open();
-            ITerminalServicesSession session = server.GetSessions().First(s => s.ConnectionState == Cassia.ConnectionState.Active);
-            if(session != null) {
+		HttpStatusCode send(string url, string json) {
+			ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12 | SecurityProtocolType.Tls11 | SecurityProtocolType.Tls;
+			ServicePointManager.ServerCertificateValidationCallback = ((sender, certificate, chain, sslPolicyErrors) => true);
+			try {
+				HttpWebRequest httpWebRequest = (HttpWebRequest)WebRequest.Create(url);
+				httpWebRequest.ContentType = "application/json; charset=utf-8";
+				httpWebRequest.Method = "POST";
 
-                string userName = session.UserAccount.Value.Remove(0, 1 + session.DomainName.Length);
-                if(!settings.serverUrl.EndsWith("/")) settings.serverUrl += '/';
-                string url = new StringBuilder(settings.serverUrl).Append(settings.computerName).ToString();
-                string json = new StringBuilder("{\"key\": \"").Append(settings.key).Append("\", \"lastLoggedUser\": \"").Append(userName).Append("\"}").ToString();
+				using (StreamWriter streamWriter = new StreamWriter(httpWebRequest.GetRequestStream())) {
+					streamWriter.Write(json);
+				}
+				using (var response = httpWebRequest.GetResponse()) {
+					return (((HttpWebResponse)response).StatusCode);
+				}
+			} catch (Exception e) {
+				EventLog.WriteEntry("session ex\n>> " + e.Message + "\n>> " + e.StackTrace);
+				return HttpStatusCode.ExpectationFailed;
+			}
+			//HttpWebResponse httpRes = (HttpWebResponse) httpWebRequest.GetResponse();
+		}
 
-                HttpWebRequest httpWebRequest = (HttpWebRequest) WebRequest.Create(url);
-                httpWebRequest.ContentType = "application/json; charset=utf-8";
-                httpWebRequest.Method = "POST";
-                //Console.WriteLine(json);
+		void findActiveUser() {
+			string userName = "";
+			ITerminalServer server = new TerminalServicesManager().GetLocalServer();
+			try {
+				server.Open();
+				ITerminalServicesSession session = server.GetSessions().First(s => s.ConnectionState == Cassia.ConnectionState.Active);
+				userName = session.UserName;
+			} catch (InvalidOperationException ioe) {
+				userName = "";
+			} catch (Exception e) {
+				//userName = "";
+				EventLog.WriteEntry("session ex\n>> " + e.Message + "StackTrace\n>> " + e.StackTrace + "GetType\n>> " + e.GetType());
+			}
+			if (lastSendLoggedUser != userName | DateTime.Now.Subtract(lastSendTime).Minutes >= 5) {
+				string url = new StringBuilder(settings.serverUrl).Append(settings.computerName).Append("/").ToString();
+				string json = new StringBuilder("{\"key\": \"")
+					.Append(settings.key)
+					.Append("\", \"lastLoggedUser\": \"")
+					.Append(userName == String.Empty ? null : userName)
+					.Append("\"}")
+					.ToString();
+				HttpStatusCode status = send(url, json);
+				//EventLog.WriteEntry("userName\n>> " + userName + "\nlastSendLoggedUser\n>> " + lastSendLoggedUser
+				//+ "\nsendData\n>> " + json + '\n' + url + "\nstatus\n>> " + status.ToString());
+				if (status == HttpStatusCode.OK) {
+					lastSendLoggedUser = userName;
+					lastSendTime = DateTime.Now;
+				}
+			}
+		}
 
-                using(var streamWriter = new StreamWriter(httpWebRequest.GetRequestStream())) {
-                    streamWriter.Write(json);
-                }
-                using(var response = httpWebRequest.GetResponse()) {}
-                //HttpWebResponse httpRes = (HttpWebResponse) httpWebRequest.GetResponse();
-            }
-        }
 
+		protected override void OnStart(string[] args) {
+			Task.Run(() => {
 
-        protected override void OnStart(string[] args) {
-            Task.Run(() => {
-                while(true) {
-                    try {
-                        exec();
-                    } catch(WebException e) {
-                        settings = JsonConvert.DeserializeObject<Settings>(setJson);
-                        //EventLog.WriteEntry("WebException: " + e.Message, EventLogEntryType.Error);
-                    } catch(InvalidOperationException e) {
-                        settings = JsonConvert.DeserializeObject<Settings>(setJson);
-                        //EventLog.WriteEntry("InvalidOperationException: " + e.Message, EventLogEntryType.Error);
-                    } catch(Exception e) {
-                        settings = JsonConvert.DeserializeObject<Settings>(setJson);
-                        //EventLog.WriteEntry("Exception: " + e.Message, EventLogEntryType.Error);
-                    } finally {
-                        Thread.Sleep(20000);
-                    }
-                }
-            });
+				while (true) {
+					try {
+						findActiveUser();
+						//exec();
+					} catch (Exception e) {
+						settings = JsonConvert.DeserializeObject<Settings>(setJsonFile);
+						if (!settings.serverUrl.EndsWith("/")) settings.serverUrl.Append('/');
+						if (!settings.serverUrl.StartsWith("http://")) settings.serverUrl = "http://" + settings.serverUrl;
+					} finally {
+						Thread.Sleep(5000);
+						//EventLog.WriteEntry("dif seconds\n>> " + DateTime.Now.Subtract(lastSendTime).Seconds.ToString());
+					}
+				}
 
-        }
+			});
+		}
 
-        protected override void OnStop() {
-            //EventLog.WriteEntry("We did it! Stoped", EventLogEntryType.Information);
-        }
-    }
+		protected override void OnStop() { }
+	}
 }
